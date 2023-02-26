@@ -3,10 +3,13 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include "MyNTP.h"
+#include "MyMqtt.h"
 #include "secrets.h"
 
 #define SDA_PIN 3
 #define SCL_PIN 9
+
+static char TAG[] = "main";
 
 ST7032_asukiaaa lcd;
 
@@ -36,17 +39,50 @@ static void printTime(ST7032_asukiaaa *_lcd){
   _lcd->print(buf);
 }
 
-// hw_timer_t *lcd_timer = NULL;
-// volatile SemaphoreHandle_t lcd_semaphore_handle;
-// void IRAM_ATTR onLcdTimer(){
-//   xSemaphoreGiveFromISR(lcd_semahore_handle, NULL);
-// }
-// void lcdTimeStampTask(void *pvParameters) {
-//   lcd_semaphore_handle = xSemaphoreCreateBinary();
-//   lcd_timer = timerBegin(1, getApbFrequency() / 1000000, true)
-//   timerAttachInterrupt(lcd_timer, 1000, true);
-//   timerAlarmEnable(lcd_timer);
-// }
+static void pubDeviceHealth() {
+  static MQTTData pub_heap;
+  struct tm       _timeInfo;
+  time_t          now;
+  if (!getLocalTime(&_timeInfo, 5000)) {
+    return;
+  }
+  unsigned long unixTime = time(&now);
+  strncpy(pub_heap.topic, DEVICE_HEALTH_PUB_TOPIC, sizeof(pub_heap.topic) - 1);
+  sprintf(pub_heap.data,
+          "{\"time_stamp\": \"%04d-%02d-%02d %02d:%02d:%02d\",\"time_serial\": "
+          "\"%lu\",\"cpu_temp\":%.2f,\"heap_free\": %lu,\"rssi\":%d}",
+          (_timeInfo.tm_year + 1900), (_timeInfo.tm_mon + 1), (_timeInfo.tm_mday), (_timeInfo.tm_hour),
+          (_timeInfo.tm_min), (_timeInfo.tm_sec), unixTime, temperatureRead(), esp_get_free_heap_size(), WiFi.RSSI());
+  xQueueSend(pubQueue, &pub_heap, 0);
+}
+
+void lcdTask(void *pvParams){
+  while(true){
+    if(xSemaphoreTake(pub_success_semaphore_handle, 0) == pdTRUE){
+      ESP_LOGI(TAG, "Take: pub_success_semaphore");
+      printTime(&lcd);
+      lcd.setCursor(8, 0); lcd.print(" ");
+      lcd.setCursor(9, 0); lcd.print("SEND:OK");
+
+      lcd.setCursor(0, 1);
+      lcd.print("RSSI:");
+      lcd.setCursor(5, 1);
+      lcd.print(WiFi.RSSI());
+    }
+    if (xSemaphoreTake(pub_failed_semaphore_handle, 0) == pdTRUE) {
+      ESP_LOGI(TAG, "Take: pub_failed_semaphore");
+      printTime(&lcd);
+      lcd.setCursor(8, 0); lcd.print(" ");
+      lcd.setCursor(9, 0); lcd.print("SEND:NG");
+
+      lcd.setCursor(0, 1);
+      lcd.print("RSSI:");
+      lcd.setCursor(5, 1);
+      lcd.print(WiFi.RSSI());
+    }
+    delay(500);
+  }
+}
 
 void setup() {
   beginWiFiSTA();
@@ -60,22 +96,22 @@ void setup() {
     lcd.setCursor(0, 0);
     lcd.print("WiFi connected!");
     delay(2000);
+    initMqtt();
+    xTaskCreatePinnedToCore(mqttTask, "mqttTask", 8196, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(lcdTask, "lcdTask", 4096, NULL, 3, NULL, 1);
   }
 }
 
-unsigned long prev_time;
 void loop() {
   if (!WiFi.isConnected()){
     clearLcd(&lcd, 0);
     lcd.setCursor(0, 0);
     lcd.print("WiFi disconnect!");
-  }
-  printTime(&lcd);
-  lcd.setCursor(8, 0); lcd.print(" ");
-  lcd.setCursor(9, 0); lcd.print("SEND:OK");
 
-  lcd.setCursor(0, 1);
-  lcd.print("RSSI:");
-  lcd.setCursor(5, 1);
-  lcd.print(WiFi.RSSI());
+    lcd.setCursor(0, 1);
+    lcd.print("RSSI:          ");
+  } else {
+    pubDeviceHealth();
+  }
+  delay(5000);
 }
